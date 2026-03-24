@@ -32,10 +32,26 @@
 
     - name: Génération de la configuration par défaut de containerd
       shell: containerd config default > /etc/containerd/config.toml
-      args:
-        creates: /etc/containerd/config.toml
+      changed_when: true
+
+    # =====================================================================
+    # FIX CRITIQUE : Supprimer disabled_plugins = ["cri"]
+    # =====================================================================
+    # Les versions récentes de containerd (1.7+) désactivent le plugin CRI
+    # par défaut dans la config générée par "containerd config default".
+    # Or Kubernetes a BESOIN du plugin CRI pour communiquer avec containerd.
+    # Sans ce fix, kubeadm init échoue avec :
+    #   [ERROR CRI]: container runtime is not running
+    #   rpc error: code = Unimplemented desc = unknown service runtime.v1.RuntimeService
+    - name: Activation du plugin CRI (suppression de disabled_plugins)
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'disabled_plugins\s*=\s*\["cri"\]'
+        replace: 'disabled_plugins = []'
 
     - name: Configuration de containerd pour utiliser systemd cgroup driver
+      # Kubernetes et kubelet utilisent systemd pour gérer les cgroups.
+      # containerd doit faire pareil, sinon les conteneurs crashent.
       replace:
         path: /etc/containerd/config.toml
         regexp: 'SystemdCgroup = false'
@@ -47,6 +63,16 @@
         state: restarted
         enabled: yes
         daemon_reload: yes
+
+    # Vérification que containerd est bien fonctionnel après le redémarrage
+    # On utilise "ctr" (fourni avec containerd.io) et non "crictl" (fourni avec kubeadm, pas encore installé)
+    - name: Vérification du runtime containerd
+      command: ctr version
+      register: containerd_check
+      retries: 3
+      delay: 5
+      until: containerd_check.rc == 0
+      changed_when: false
 
 - name: Installation de Kubernetes (kubeadm, kubelet, kubectl)
   block:

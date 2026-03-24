@@ -8,6 +8,11 @@ variable "proxmox_api_url" {
   type        = string
 }
 
+variable "proxmox_host" {
+  description = "IP ou hostname du serveur Proxmox (pour le jump SSH vers les VMs)"
+  type        = string
+}
+
 variable "proxmox_user" {
   description = "Utilisateur Proxmox pour l'API (ex: root@pam)"
   type        = string
@@ -83,6 +88,12 @@ variable "ssh_public_key" {
 }
 
 # ---- Master Node ----
+variable "master_vmid" {
+  description = "ID Proxmox de la VM master (doit être unique, ex: 110)"
+  type        = number
+  default     = 110
+}
+
 variable "master_name" {
   description = "Nom de la VM master"
   type        = string
@@ -114,6 +125,12 @@ variable "master_disk_size" {
 }
 
 # ---- Worker Nodes ----
+variable "worker_vmid_start" {
+  description = "ID Proxmox de départ pour les workers (worker-1=111, worker-2=112, etc.)"
+  type        = number
+  default     = 111
+}
+
 variable "worker_count" {
   description = "Nombre de noeuds worker"
   type        = number
@@ -160,4 +177,3 @@ variable "acme_email" {
   description = "Email pour Let's Encrypt (certificats TLS)"
   type        = string
 }
-

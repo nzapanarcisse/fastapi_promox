@@ -35,6 +35,9 @@ provider "proxmox" {
 # VM Master Node - Control Plane Kubernetes
 ###############################################################################
 resource "proxmox_vm_qemu" "k8s_master" {
+  # ID fixe pour éviter les conflits avec des VMs existantes
+  # Proxmox auto-assigne à partir de 100 → on utilise 110+ pour nos VMs
+  vmid        = var.master_vmid
   name        = var.master_name
   target_node = var.proxmox_node
   clone       = var.template_name
@@ -42,13 +45,24 @@ resource "proxmox_vm_qemu" "k8s_master" {
   os_type     = "cloud-init"
   cores       = var.master_cores
   sockets     = 1
-  cpu_type    = "host"
+  cpu         = "host"
   memory      = var.master_memory
   scsihw      = "virtio-scsi-single"
   bootdisk    = "scsi0"
   onboot      = true
 
+  # Configuration de la console série (nécessaire pour les images cloud Ubuntu)
+  # Sans ça, qm terminal ne fonctionne pas et la console web reste noire
+  serial {
+    id   = 0
+    type = "socket"
+  }
+  vga {
+    type = "serial0"
+  }
+
   disks {
+    # Disque principal : le système Ubuntu cloné depuis le template
     scsi {
       scsi0 {
         disk {
@@ -57,10 +71,18 @@ resource "proxmox_vm_qemu" "k8s_master" {
         }
       }
     }
+    # Disque cloud-init : contient la configuration (IP, user, SSH keys)
+    # INDISPENSABLE — sans ce disque, la VM démarre sans réseau ni utilisateur
+    ide {
+      ide2 {
+        cloudinit {
+          storage = var.storage_pool
+        }
+      }
+    }
   }
 
   network {
-    id     = 0
     model  = "virtio"
     bridge = var.network_bridge
     tag    = var.vlan_tag
@@ -86,6 +108,8 @@ resource "proxmox_vm_qemu" "k8s_master" {
 ###############################################################################
 resource "proxmox_vm_qemu" "k8s_workers" {
   count       = var.worker_count
+  # ID fixe par worker : 111, 112, etc. pour éviter les conflits
+  vmid        = var.worker_vmid_start + count.index
   name        = "${var.worker_name_prefix}-${count.index + 1}"
   target_node = var.proxmox_node
   clone       = var.template_name
@@ -93,11 +117,19 @@ resource "proxmox_vm_qemu" "k8s_workers" {
   os_type     = "cloud-init"
   cores       = var.worker_cores
   sockets     = 1
-  cpu_type    = "host"
+  cpu         = "host"
   memory      = var.worker_memory
   scsihw      = "virtio-scsi-single"
   bootdisk    = "scsi0"
   onboot      = true
+
+  serial {
+    id   = 0
+    type = "socket"
+  }
+  vga {
+    type = "serial0"
+  }
 
   disks {
     scsi {
@@ -108,10 +140,16 @@ resource "proxmox_vm_qemu" "k8s_workers" {
         }
       }
     }
+    ide {
+      ide2 {
+        cloudinit {
+          storage = var.storage_pool
+        }
+      }
+    }
   }
 
   network {
-    id     = 0
     model  = "virtio"
     bridge = var.network_bridge
     tag    = var.vlan_tag

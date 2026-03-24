@@ -1,5 +1,7 @@
 ###############################################################################
-# Traefik Helm Values - Configuration pour Gateway API + Let's Encrypt
+# Traefik Helm Values - Configuration pour Gateway API + Cert-Manager
+# NOTE : certResolvers a été supprimé dans le chart Traefik v33+
+#        Les certificats TLS sont gérés par Cert-Manager (pas par Traefik)
 ###############################################################################
 
 # Utilisation de Traefik v3 avec support Gateway API
@@ -21,6 +23,7 @@ ports:
     port: 8000
     exposedPort: 80
     protocol: TCP
+    # Redirection HTTP → HTTPS
     redirectTo:
       port: websecure
   websecure:
@@ -29,24 +32,10 @@ ports:
     protocol: TCP
     tls:
       enabled: true
-      certResolver: letsencrypt
+      # Pas de certResolver ici — Cert-Manager gère les certificats
+      # via des ressources Certificate/ClusterIssuer dans Kubernetes
 
-# Certificats Let's Encrypt
-certResolvers:
-  letsencrypt:
-    email: "{{ acme_email }}"
-    tlsChallenge: true
-    httpChallenge:
-      entryPoint: web
-    storage: /data/acme.json
-
-# Persistance pour les certificats
-persistence:
-  enabled: true
-  size: 128Mi
-  path: /data
-
-# Service de type LoadBalancer (ou NodePort pour on-premise)
+# Service de type NodePort (pas de LoadBalancer sur bare-metal/Proxmox)
 service:
   type: NodePort
   spec:
@@ -59,8 +48,6 @@ ingressRoute:
     matchRule: Host(`traefik.{{ domain }}`)
     entryPoints:
       - websecure
-    tls:
-      certResolver: letsencrypt
 
 # Logs
 logs:
@@ -92,4 +79,3 @@ deployment:
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
-

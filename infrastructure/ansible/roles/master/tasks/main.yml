@@ -12,6 +12,15 @@
     path: /etc/kubernetes/admin.conf
   register: k8s_admin_conf
 
+# En cas de re-exécution après un échec de kubeadm init,
+# il faut nettoyer l'état partiel pour éviter les conflits.
+# kubeadm reset supprime les fichiers/configs partiellement créés.
+- name: Reset kubeadm si une initialisation précédente a échoué
+  command: kubeadm reset -f
+  when: not k8s_admin_conf.stat.exists
+  changed_when: true
+  ignore_errors: yes
+
 - name: Initialisation du cluster Kubernetes
   command: >
     kubeadm init

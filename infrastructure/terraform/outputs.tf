@@ -32,12 +32,33 @@ output "domain" {
   value       = var.domain
 }
 
+output "ssh_commands" {
+  description = "Commandes SSH pour se connecter aux VMs (via jump host Proxmox)"
+  value = join("\n", concat(
+    [
+      "# ============================================================",
+      "# Les VMs sont sur un réseau PRIVÉ (10.10.10.0/24)",
+      "# → Impossible d'y accéder directement depuis votre machine",
+      "# → Il faut passer par Proxmox comme 'jump host' (rebond SSH)",
+      "# ============================================================",
+      "",
+      "# Master :",
+      "ssh -i ~/.ssh/proxmox_key -J root@${var.proxmox_host} ${var.vm_user}@${var.master_ip}",
+      "",
+    ],
+    [for i, ip in var.worker_ips :
+      "# Worker-${i + 1} :\nssh -i ~/.ssh/proxmox_key -J root@${var.proxmox_host} ${var.vm_user}@${ip}\n"
+    ]
+  ))
+}
+
 # Génération automatique de l'inventaire Ansible
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/templates/inventory.tpl", {
-    master_ip   = var.master_ip
-    worker_ips  = var.worker_ips
-    ssh_user    = var.vm_user
+    master_ip    = var.master_ip
+    worker_ips   = var.worker_ips
+    ssh_user     = var.vm_user
+    proxmox_host = var.proxmox_host
   })
   filename = "${path.module}/../ansible/inventory/hosts.ini"
 }
@@ -51,4 +72,3 @@ resource "local_file" "ansible_vars" {
   })
   filename = "${path.module}/../ansible/group_vars/all.yml"
 }
-

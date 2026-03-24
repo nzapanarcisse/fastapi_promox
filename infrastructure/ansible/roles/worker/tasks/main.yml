@@ -10,6 +10,12 @@
     path: /etc/kubernetes/kubelet.conf
   register: kubelet_conf
 
+- name: Reset kubeadm si une jonction précédente a échoué
+  command: kubeadm reset -f
+  when: not kubelet_conf.stat.exists
+  changed_when: true
+  ignore_errors: yes
+
 - name: Jonction du worker au cluster Kubernetes
   command: "{{ hostvars[groups['masters'][0]].k8s_join_command }}"
   when: not kubelet_conf.stat.exists

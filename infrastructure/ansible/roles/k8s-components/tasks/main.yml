@@ -172,17 +172,20 @@
       debug:
         msg: "ArgoCD Admin Password: {{ argocd_password.stdout }}"
 
-# ---- Karpenter-like Autoscaling (Cluster Autoscaler adapté on-premise) ----
-# Note: Karpenter est conçu pour les clouds publics (AWS). Sur Proxmox/on-premise,
-# on utilise le Horizontal Pod Autoscaler (HPA) + Cluster Proportional Autoscaler
+# ---- Création du namespace applicatif ----
+# Ce namespace doit être créé AVANT les HPAs car ils ciblent ce namespace
+- name: Création du namespace pour l'application FastAPI
+  command: kubectl create namespace fastapi-app
+  register: ns_fastapi
+  changed_when: "'created' in ns_fastapi.stdout"
+  failed_when: ns_fastapi.rc != 0 and 'already exists' not in ns_fastapi.stderr
+
+# ---- HPA Autoscaling ----
+# Note: Ces HPAs sont des configurations par défaut.
+# Le chart Helm de l'application inclut aussi ses propres HPAs (templates/hpa.yaml).
+# Ceux-ci seront écrasés/fusionnés lors du déploiement Helm.
 - name: Configuration de l'autoscaling horizontal
   block:
-    - name: Création du namespace autoscaling
-      command: kubectl create namespace autoscaling
-      register: ns_autoscaling
-      changed_when: "'created' in ns_autoscaling.stdout"
-      failed_when: ns_autoscaling.rc != 0 and 'already exists' not in ns_autoscaling.stderr
-
     - name: Copie de la configuration HPA par défaut
       template:
         src: default-hpa.yml.j2
@@ -193,12 +196,6 @@
       register: hpa_result
       changed_when: "'created' in hpa_result.stdout or 'configured' in hpa_result.stdout"
 
-# ---- Création du namespace applicatif ----
-- name: Création du namespace pour l'application FastAPI
-  command: kubectl create namespace fastapi-app
-  register: ns_fastapi
-  changed_when: "'created' in ns_fastapi.stdout"
-  failed_when: ns_fastapi.rc != 0 and 'already exists' not in ns_fastapi.stderr
 
 # ---- Résumé ----
 - name: Affichage du résumé d'installation
