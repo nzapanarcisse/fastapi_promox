@@ -1,0 +1,53 @@
+###############################################################################
+# ArgoCD Application - Déploiement GitOps de l'application FastAPI
+# ArgoCD surveille le repo Git et synchronise automatiquement les changements
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fastapi-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # URL du dépôt Git contenant le Helm chart
+    repoURL: "https://github.com/VOTRE_ORG/fastapi-traefik-datascientest-project.git"
+    targetRevision: main
+    path: infrastructure/helm/fastapi-app
+
+    helm:
+      valueFiles:
+        - values.yaml
+        # Surcharge avec les valeurs de production
+        - values-production.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fastapi-app
+
+  syncPolicy:
+    automated:
+      prune: true        # Supprime les ressources qui ne sont plus dans Git
+      selfHeal: true     # Recrée les ressources modifiées manuellement
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m0s
+
+  # Vérification de la santé des ressources
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas  # Ignore les différences de replicas (géré par HPA)
+

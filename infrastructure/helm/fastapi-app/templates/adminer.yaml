@@ -1,0 +1,56 @@
+###############################################################################
+# Deployment Adminer - Interface d'administration de la base de données
+###############################################################################
+{{- if .Values.adminer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastapi-adminer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.adminerLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.adminer.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fastapi-adminer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastapi-adminer
+        app.kubernetes.io/component: adminer
+    spec:
+      containers:
+        - name: adminer
+          image: adminer:latest
+          ports:
+            - name: http
+              containerPort: {{ .Values.adminer.port }}
+              protocol: TCP
+          env:
+            - name: ADMINER_DESIGN
+              value: "pepa-linha-dark"
+            - name: ADMINER_DEFAULT_SERVER
+              value: {{ .Values.backend.env.POSTGRES_SERVER | quote }}
+          resources:
+            {{- toYaml .Values.adminer.resources | nindent 12 }}
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-adminer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.adminerLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.adminer.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: fastapi-adminer
+{{- end }}
+

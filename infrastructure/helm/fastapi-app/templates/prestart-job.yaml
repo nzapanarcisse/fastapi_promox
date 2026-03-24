@@ -1,0 +1,41 @@
+###############################################################################
+# Job Prestart - Exécute les migrations Alembic et l'initialisation de la DB
+# Ce job s'exécute avant le déploiement du backend via un hook Helm
+###############################################################################
+{{- if .Values.prestart.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fastapi-prestart-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.backendLabels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fastapi-prestart
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ .Values.backend.env.POSTGRES_SERVER }} {{ .Values.backend.env.POSTGRES_PORT }}; do echo "Waiting for PostgreSQL..."; sleep 3; done']
+      containers:
+        - name: prestart
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: ["bash", "scripts/prestart.sh"]
+          envFrom:
+            - configMapRef:
+                name: fastapi-backend-config
+            - secretRef:
+                name: fastapi-app-secrets
+      restartPolicy: OnFailure
+{{- end }}
+

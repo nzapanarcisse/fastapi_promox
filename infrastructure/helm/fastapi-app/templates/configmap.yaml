@@ -1,0 +1,27 @@
+###############################################################################
+# ConfigMap - Variables d'environnement non sensibles du backend
+###############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastapi-backend-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.backendLabels" . | nindent 4 }}
+data:
+  DOMAIN: {{ .Values.global.domain | quote }}
+  ENVIRONMENT: {{ .Values.global.environment | quote }}
+  FRONTEND_HOST: {{ .Values.backend.env.FRONTEND_HOST | quote }}
+  BACKEND_CORS_ORIGINS: {{ .Values.backend.env.BACKEND_CORS_ORIGINS | quote }}
+  PROJECT_NAME: {{ .Values.backend.env.PROJECT_NAME | quote }}
+  POSTGRES_SERVER: {{ .Values.backend.env.POSTGRES_SERVER | quote }}
+  POSTGRES_PORT: {{ .Values.backend.env.POSTGRES_PORT | quote }}
+  POSTGRES_DB: {{ .Values.backend.env.POSTGRES_DB | quote }}
+  POSTGRES_USER: {{ .Values.backend.env.POSTGRES_USER | quote }}
+  SMTP_HOST: {{ .Values.backend.env.SMTP_HOST | quote }}
+  SMTP_PORT: {{ .Values.backend.env.SMTP_PORT | quote }}
+  SMTP_USER: {{ .Values.backend.env.SMTP_USER | quote }}
+  SMTP_PASSWORD: {{ .Values.backend.env.SMTP_PASSWORD | quote }}
+  EMAILS_FROM_EMAIL: {{ .Values.backend.env.EMAILS_FROM_EMAIL | quote }}
+  SENTRY_DSN: {{ .Values.backend.env.SENTRY_DSN | quote }}
+

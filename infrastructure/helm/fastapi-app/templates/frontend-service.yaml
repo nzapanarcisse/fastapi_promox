@@ -1,0 +1,20 @@
+###############################################################################
+# Service Frontend - Expose le frontend React/Nginx en interne
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastapi-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.frontendLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.frontend.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: fastapi-frontend
+

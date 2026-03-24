@@ -1,0 +1,21 @@
+---
+###############################################################################
+# Rôle worker - Jonction des workers au cluster Kubernetes
+# - Récupération de la commande de jonction depuis le master
+# - Exécution de kubeadm join sur chaque worker
+###############################################################################
+
+- name: Vérifier si le noeud a déjà rejoint le cluster
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: Jonction du worker au cluster Kubernetes
+  command: "{{ hostvars[groups['masters'][0]].k8s_join_command }}"
+  when: not kubelet_conf.stat.exists
+  register: join_result
+
+- name: Affichage du résultat de la jonction
+  debug:
+    msg: "{{ join_result.stdout_lines | default(['Worker déjà dans le cluster']) }}"
+

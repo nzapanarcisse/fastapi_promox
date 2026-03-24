@@ -1,0 +1,96 @@
+---
+###############################################################################
+# Rôle master - Initialisation du Control Plane Kubernetes
+# - Initialisation du cluster avec kubeadm
+# - Installation du réseau CNI (Flannel)
+# - Génération du token de jonction pour les workers
+# - Configuration de kubectl pour l'utilisateur
+###############################################################################
+
+- name: Vérifier si le cluster est déjà initialisé
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+
+- name: Initialisation du cluster Kubernetes
+  command: >
+    kubeadm init
+    --apiserver-advertise-address={{ k8s_master_ip }}
+    --pod-network-cidr={{ k8s_pod_network_cidr }}
+    --service-cidr={{ k8s_service_cidr }}
+    --node-name=k8s-master
+  when: not k8s_admin_conf.stat.exists
+  register: kubeadm_init
+
+- name: Création du répertoire .kube pour root
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0755'
+
+- name: Copie de admin.conf pour root
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: yes
+    mode: '0600'
+
+- name: Création du répertoire .kube pour l'utilisateur
+  file:
+    path: "/home/{{ ansible_user }}/.kube"
+    state: directory
+    mode: '0755'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+
+- name: Copie de admin.conf pour l'utilisateur
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    remote_src: yes
+    mode: '0600'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+
+- name: Installation du réseau CNI Flannel
+  become: false
+  command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+  register: flannel_result
+  changed_when: "'created' in flannel_result.stdout or 'configured' in flannel_result.stdout"
+
+- name: Attente que le master soit Ready
+  become: false
+  shell: kubectl get nodes | grep k8s-master | grep -w Ready
+  register: master_ready
+  retries: 30
+  delay: 10
+  until: master_ready.rc == 0
+
+- name: Génération de la commande de jonction pour les workers
+  command: kubeadm token create --print-join-command
+  register: join_command
+  changed_when: false
+
+- name: Sauvegarde de la commande de jonction
+  set_fact:
+    k8s_join_command: "{{ join_command.stdout }}"
+
+- name: Sauvegarde du kubeconfig localement
+  fetch:
+    src: /etc/kubernetes/admin.conf
+    dest: "{{ playbook_dir }}/../kubeconfig"
+    flat: yes
+
+- name: Installation de Helm
+  block:
+    - name: Téléchargement du script d'installation Helm
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+
+    - name: Installation de Helm
+      command: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+

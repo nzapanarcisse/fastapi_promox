@@ -1,0 +1,78 @@
+###############################################################################
+# ArgoCD Helm Values - Configuration pour le déploiement GitOps
+###############################################################################
+
+# Configuration du serveur ArgoCD
+server:
+  # Désactiver TLS interne car Traefik gère le TLS
+  extraArgs:
+    - --insecure
+
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.tls: "true"
+    hosts:
+      - "argocd.{{ domain }}"
+    tls:
+      - secretName: argocd-tls
+        hosts:
+          - "argocd.{{ domain }}"
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Configuration du contrôleur
+controller:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Configuration du repo server
+repoServer:
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Redis
+redis:
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "256Mi"
+
+# Notifications (optionnel)
+notifications:
+  enabled: false
+
+# ApplicationSet controller
+applicationSet:
+  enabled: true
+
+# Dex (SSO - désactivé par défaut)
+dex:
+  enabled: false
+
+configs:
+  params:
+    server.insecure: true
+

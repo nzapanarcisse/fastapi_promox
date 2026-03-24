@@ -1,0 +1,95 @@
+###############################################################################
+# Traefik Helm Values - Configuration pour Gateway API + Let's Encrypt
+###############################################################################
+
+# Utilisation de Traefik v3 avec support Gateway API
+image:
+  tag: "{{ traefik_version }}"
+
+# Activation du Gateway API provider
+providers:
+  kubernetesGateway:
+    enabled: true
+  kubernetesCRD:
+    enabled: true
+  kubernetesIngress:
+    enabled: true
+
+# Points d'entrée
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    protocol: TCP
+    redirectTo:
+      port: websecure
+  websecure:
+    port: 8443
+    exposedPort: 443
+    protocol: TCP
+    tls:
+      enabled: true
+      certResolver: letsencrypt
+
+# Certificats Let's Encrypt
+certResolvers:
+  letsencrypt:
+    email: "{{ acme_email }}"
+    tlsChallenge: true
+    httpChallenge:
+      entryPoint: web
+    storage: /data/acme.json
+
+# Persistance pour les certificats
+persistence:
+  enabled: true
+  size: 128Mi
+  path: /data
+
+# Service de type LoadBalancer (ou NodePort pour on-premise)
+service:
+  type: NodePort
+  spec:
+    externalTrafficPolicy: Local
+
+# Activation du dashboard Traefik
+ingressRoute:
+  dashboard:
+    enabled: true
+    matchRule: Host(`traefik.{{ domain }}`)
+    entryPoints:
+      - websecure
+    tls:
+      certResolver: letsencrypt
+
+# Logs
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+
+# Ressources
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Tolérations pour s'exécuter sur tous les noeuds si nécessaire
+tolerations: []
+
+# Node selector
+nodeSelector: {}
+
+# Nombre de réplicas
+deployment:
+  replicas: 2
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+

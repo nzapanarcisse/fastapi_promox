@@ -1,0 +1,486 @@
+###############################################################################
+# Pipeline CI/CD Complet - GitHub Actions
+# Déploiement end-to-end : Infrastructure → Kubernetes → Build → Deploy
+#
+# Stages:
+#   1. infrastructure  - Provisioning des VMs sur Proxmox via Terraform
+#   2. configure-k8s   - Installation de Kubernetes et composants via Ansible
+#   3. build-test      - Build et test de l'application FastAPI
+#   4. build-images    - Construction des images Docker (backend + frontend)
+#   5. deploy          - Déploiement sur Kubernetes via ArgoCD
+###############################################################################
+
+name: "CI/CD - FastAPI Proxmox Deployment"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_infra:
+        description: "Déployer l'infrastructure Terraform"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      configure_k8s:
+        description: "Configurer Kubernetes via Ansible"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      deploy_app:
+        description: "Déployer l'application"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+env:
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+  BACKEND_IMAGE: ${{ vars.DOCKER_REGISTRY }}/fastapi-backend
+  FRONTEND_IMAGE: ${{ vars.DOCKER_REGISTRY }}/fastapi-frontend
+  K8S_NAMESPACE: fastapi-app
+
+jobs:
+  ###########################################################################
+  # STAGE 1 : Infrastructure - Provisioning des VMs sur Proxmox
+  ###########################################################################
+  infrastructure:
+    name: "🏗️ Terraform - Provisioning Infrastructure"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deploy_infra == 'true'
+    defaults:
+      run:
+        working-directory: infrastructure/terraform
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Création du fichier terraform.tfvars
+        run: |
+          cat > terraform.tfvars << 'EOF'
+          proxmox_api_url  = "${{ secrets.PROXMOX_API_URL }}"
+          proxmox_user     = "${{ secrets.PROXMOX_USER }}"
+          proxmox_password = "${{ secrets.PROXMOX_PASSWORD }}"
+          proxmox_node     = "${{ vars.PROXMOX_NODE }}"
+          template_name    = "${{ vars.VM_TEMPLATE }}"
+          storage_pool     = "${{ vars.STORAGE_POOL }}"
+          network_bridge   = "${{ vars.NETWORK_BRIDGE }}"
+          vlan_tag         = ${{ vars.VLAN_TAG || -1 }}
+          subnet_mask      = "${{ vars.SUBNET_MASK || '24' }}"
+          gateway_ip       = "${{ vars.GATEWAY_IP }}"
+          dns_servers      = "${{ vars.DNS_SERVERS || '8.8.8.8 8.8.4.4' }}"
+          vm_user          = "${{ vars.VM_USER || 'k8sadmin' }}"
+          ssh_public_key   = "${{ secrets.SSH_PUBLIC_KEY }}"
+          master_ip        = "${{ vars.MASTER_IP }}"
+          worker_ips       = ${{ vars.WORKER_IPS }}
+          domain           = "${{ vars.DOMAIN }}"
+          acme_email       = "${{ vars.ACME_EMAIL }}"
+          EOF
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -var-file=terraform.tfvars -out=tfplan
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve tfplan
+
+      - name: Upload Ansible inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ansible-inventory
+          path: infrastructure/ansible/inventory/
+          retention-days: 1
+
+      - name: Upload Ansible group_vars
+        uses: actions/upload-artifact@v4
+        with:
+          name: ansible-vars
+          path: infrastructure/ansible/group_vars/
+          retention-days: 1
+
+  ###########################################################################
+  # STAGE 2 : Configuration Kubernetes - Installation via Ansible
+  ###########################################################################
+  configure-k8s:
+    name: "⚙️ Ansible - Configuration Kubernetes"
+    runs-on: ubuntu-latest
+    needs: [infrastructure]
+    if: |
+      always() &&
+      (github.event.inputs.configure_k8s == 'true' || needs.infrastructure.result == 'success')
+    defaults:
+      run:
+        working-directory: infrastructure/ansible
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Download Ansible inventory (depuis Terraform)
+        uses: actions/download-artifact@v4
+        with:
+          name: ansible-inventory
+          path: infrastructure/ansible/inventory/
+        continue-on-error: true
+
+      - name: Download Ansible group_vars (depuis Terraform)
+        uses: actions/download-artifact@v4
+        with:
+          name: ansible-vars
+          path: infrastructure/ansible/group_vars/
+        continue-on-error: true
+
+      - name: Création de l'inventaire Ansible (si pas généré par Terraform)
+        run: |
+          mkdir -p inventory group_vars
+          if [ ! -f inventory/hosts.ini ]; then
+            cat > inventory/hosts.ini << 'EOF'
+          [masters]
+          ${{ vars.MASTER_IP }} ansible_user=${{ vars.VM_USER || 'k8sadmin' }}
+
+          [workers]
+          ${{ vars.WORKER_IP_1 }} ansible_user=${{ vars.VM_USER || 'k8sadmin' }}
+          ${{ vars.WORKER_IP_2 }} ansible_user=${{ vars.VM_USER || 'k8sadmin' }}
+
+          [k8s_cluster:children]
+          masters
+          workers
+
+          [k8s_cluster:vars]
+          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ansible_become=true
+          EOF
+          fi
+
+          if [ ! -f group_vars/all.yml ]; then
+            cat > group_vars/all.yml << 'EOF'
+          ---
+          k8s_master_ip: "${{ vars.MASTER_IP }}"
+          k8s_worker_ips:
+            - "${{ vars.WORKER_IP_1 }}"
+            - "${{ vars.WORKER_IP_2 }}"
+          k8s_version: "1.29"
+          k8s_pod_network_cidr: "10.244.0.0/16"
+          k8s_service_cidr: "10.96.0.0/12"
+          domain: "${{ vars.DOMAIN }}"
+          acme_email: "${{ vars.ACME_EMAIL }}"
+          containerd_version: "1.7.*"
+          traefik_version: "v3.2.1"
+          traefik_chart_version: "33.2.1"
+          cert_manager_version: "v1.16.2"
+          argocd_version: "v2.13.3"
+          argocd_chart_version: "7.7.12"
+          EOF
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installation d'Ansible
+        run: pip install ansible
+
+      - name: Configuration de la clé SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ vars.MASTER_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H ${{ vars.WORKER_IP_1 }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H ${{ vars.WORKER_IP_2 }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Vérification de la connectivité
+        run: ansible all -i inventory/hosts.ini -m ping --private-key=~/.ssh/id_rsa
+
+      - name: Exécution du playbook Ansible
+        run: |
+          ansible-playbook site.yml \
+            -i inventory/hosts.ini \
+            --private-key=~/.ssh/id_rsa \
+            -v
+
+      - name: Upload kubeconfig
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconfig
+          path: infrastructure/kubeconfig
+          retention-days: 1
+
+  ###########################################################################
+  # STAGE 3 : Build & Test - Application FastAPI
+  ###########################################################################
+  build-test:
+    name: "🧪 Build & Test Backend"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deploy_app != 'false'
+
+    services:
+      postgres:
+        image: postgres:12
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: changethis
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Installation de uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Installation des dépendances backend
+        working-directory: backend
+        run: uv sync
+
+      - name: Linting (Ruff)
+        working-directory: backend
+        run: uv run ruff check app/
+
+      - name: Type checking (MyPy)
+        working-directory: backend
+        run: uv run mypy app/
+        continue-on-error: true
+
+      - name: Tests unitaires (Pytest)
+        working-directory: backend
+        env:
+          POSTGRES_SERVER: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: app
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: changethis
+          SECRET_KEY: test-secret-key
+          FIRST_SUPERUSER: admin@example.com
+          FIRST_SUPERUSER_PASSWORD: changethis
+          ENVIRONMENT: local
+          PROJECT_NAME: "FastAPI Test"
+          DOMAIN: localhost
+          FRONTEND_HOST: "http://localhost:5173"
+        run: |
+          uv run bash scripts/prestart.sh
+          uv run coverage run --source=app -m pytest app/tests/ -v
+          uv run coverage report --fail-under=50
+
+  ###########################################################################
+  # STAGE 4 : Build Docker Images
+  ###########################################################################
+  build-images:
+    name: "🐳 Build Docker Images"
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.DOCKER_REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Métadonnées Docker (Backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            latest
+
+      - name: Build & Push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Métadonnées Docker (Frontend)
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            latest
+
+      - name: Build & Push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          build-args: |
+            VITE_API_URL=https://api.${{ vars.DOMAIN }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  ###########################################################################
+  # STAGE 5 : Déploiement sur Kubernetes via ArgoCD
+  ###########################################################################
+  deploy:
+    name: "🚀 Deploy to Kubernetes"
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Download kubeconfig
+        uses: actions/download-artifact@v4
+        with:
+          name: kubeconfig
+          path: ./
+        continue-on-error: true
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configuration de kubectl
+        run: |
+          mkdir -p ~/.kube
+          if [ -f kubeconfig ]; then
+            cp kubeconfig ~/.kube/config
+          fi
+          # Fallback : utiliser le kubeconfig depuis les secrets
+          if [ ! -f ~/.kube/config ]; then
+            echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          fi
+          chmod 600 ~/.kube/config
+
+      - name: Vérification de la connexion au cluster
+        run: kubectl cluster-info && kubectl get nodes
+
+      - name: Mise à jour du tag de l'image dans le Helm chart
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          cd infrastructure/helm/fastapi-app
+
+          # Mise à jour des tags d'images
+          sed -i "s|tag: \"latest\"|tag: \"${SHORT_SHA}\"|g" values-production.yaml
+
+          # Mise à jour du repository d'images
+          sed -i "s|repository: \"registry.example.com/fastapi-backend\"|repository: \"${{ env.BACKEND_IMAGE }}\"|g" values-production.yaml
+          sed -i "s|repository: \"registry.example.com/fastapi-frontend\"|repository: \"${{ env.FRONTEND_IMAGE }}\"|g" values-production.yaml
+
+          # Mise à jour du domaine
+          sed -i "s|domain: \"example.com\"|domain: \"${{ vars.DOMAIN }}\"|g" values-production.yaml
+
+      - name: Application du manifeste ArgoCD
+        run: |
+          # Mise à jour du repo URL dans le manifest ArgoCD
+          sed -i "s|VOTRE_ORG|${{ github.repository_owner }}|g" infrastructure/argocd/application.yaml
+
+          # Application des manifests ArgoCD
+          kubectl apply -f infrastructure/argocd/project.yaml
+          kubectl apply -f infrastructure/argocd/application.yaml
+
+      - name: Installation via Helm (fallback si ArgoCD pas encore prêt)
+        run: |
+          # Mise à jour des dépendances Helm
+          cd infrastructure/helm/fastapi-app
+          helm dependency update
+
+          # Installation/mise à jour de l'application
+          helm upgrade --install fastapi-app . \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --create-namespace \
+            -f values.yaml \
+            -f values-production.yaml \
+            --set backend.image.tag="${{ github.sha }}" \
+            --set frontend.image.tag="${{ github.sha }}" \
+            --set backend.image.repository="${{ env.BACKEND_IMAGE }}" \
+            --set frontend.image.repository="${{ env.FRONTEND_IMAGE }}" \
+            --set global.domain="${{ vars.DOMAIN }}" \
+            --set backend.env.FRONTEND_HOST="https://dashboard.${{ vars.DOMAIN }}" \
+            --set backend.env.BACKEND_CORS_ORIGINS="https://dashboard.${{ vars.DOMAIN }}" \
+            --set frontend.env.VITE_API_URL="https://api.${{ vars.DOMAIN }}" \
+            --wait --timeout 600s
+        continue-on-error: true
+
+      - name: Vérification du déploiement
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "=== Ingress ==="
+          kubectl get ingress -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "=== HPA ==="
+          kubectl get hpa -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "============================================================"
+          echo "🎉 Déploiement terminé !"
+          echo "============================================================"
+          echo "Frontend: https://dashboard.${{ vars.DOMAIN }}"
+          echo "Backend:  https://api.${{ vars.DOMAIN }}"
+          echo "ArgoCD:   https://argocd.${{ vars.DOMAIN }}"
+          echo "============================================================"
+
+  ###########################################################################
+  # Notification de fin
+  ###########################################################################
+  notify:
+    name: "📢 Notification"
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+
+    steps:
+      - name: Résultat du déploiement
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ Déploiement réussi !"
+          else
+            echo "❌ Échec du déploiement"
+            exit 1
+          fi
+

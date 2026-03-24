@@ -1,0 +1,36 @@
+---
+###############################################################################
+# Playbook principal - Installation complète du cluster Kubernetes
+# Exécute les rôles dans l'ordre : common → kubernetes → master → worker → k8s-components
+###############################################################################
+
+- name: Configuration commune de toutes les VMs
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - common
+
+- name: Installation des composants Kubernetes (kubeadm, kubelet, kubectl)
+  hosts: k8s_cluster
+  become: true
+  roles:
+    - kubernetes
+
+- name: Initialisation du cluster Kubernetes (Control Plane)
+  hosts: masters
+  become: true
+  roles:
+    - master
+
+- name: Jonction des workers au cluster
+  hosts: workers
+  become: true
+  roles:
+    - worker
+
+- name: Installation des composants du cluster (Traefik, Cert-Manager, ArgoCD, etc.)
+  hosts: masters
+  become: false
+  roles:
+    - k8s-components
+

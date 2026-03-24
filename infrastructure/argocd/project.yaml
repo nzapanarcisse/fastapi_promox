@@ -1,0 +1,45 @@
+###############################################################################
+# ArgoCD Project - Projet dédié pour l'application FastAPI
+# Permet de restreindre les permissions et les destinations
+###############################################################################
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: fastapi-project
+  namespace: argocd
+spec:
+  description: "Projet FastAPI Full-Stack"
+
+  # Dépôts Git autorisés
+  sourceRepos:
+    - "https://github.com/VOTRE_ORG/fastapi-traefik-datascientest-project.git"
+    - "https://charts.bitnami.com/bitnami"
+
+  # Destinations autorisées
+  destinations:
+    - namespace: fastapi-app
+      server: https://kubernetes.default.svc
+    - namespace: argocd
+      server: https://kubernetes.default.svc
+
+  # Types de ressources autorisés
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: networking.k8s.io
+      kind: Ingress
+
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: "*"
+    - group: apps
+      kind: "*"
+    - group: batch
+      kind: "*"
+    - group: autoscaling
+      kind: "*"
+    - group: networking.k8s.io
+      kind: "*"
+    - group: cert-manager.io
+      kind: "*"
+

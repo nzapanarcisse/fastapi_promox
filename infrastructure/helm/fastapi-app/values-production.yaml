@@ -1,0 +1,66 @@
+###############################################################################
+# Helm Values - Production Override
+# Ce fichier surcharge values.yaml pour l'environnement de production
+# Référencé par ArgoCD dans application.yaml
+###############################################################################
+
+global:
+  # REMPLACER par votre domaine réel configuré dans Cloud DNS
+  domain: "example.com"
+  environment: "production"
+
+backend:
+  image:
+    repository: "registry.example.com/fastapi-backend"
+    tag: "latest"
+    pullPolicy: Always
+  replicaCount: 2
+  env:
+    DOMAIN: "example.com"
+    ENVIRONMENT: "production"
+    BACKEND_CORS_ORIGINS: "https://dashboard.example.com"
+    FRONTEND_HOST: "https://dashboard.example.com"
+    PROJECT_NAME: "FastAPI App"
+    POSTGRES_SERVER: "fastapi-app-postgresql"
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: "app"
+    POSTGRES_USER: "app"
+  secrets:
+    POSTGRES_PASSWORD: "CHANGE_ME_IN_SEALED_SECRET"
+    SECRET_KEY: "CHANGE_ME_IN_SEALED_SECRET"
+    FIRST_SUPERUSER: "admin@example.com"
+    FIRST_SUPERUSER_PASSWORD: "CHANGE_ME_IN_SEALED_SECRET"
+
+frontend:
+  image:
+    repository: "registry.example.com/fastapi-frontend"
+    tag: "latest"
+    pullPolicy: Always
+  replicaCount: 2
+  env:
+    VITE_API_URL: "https://api.example.com"
+
+postgresql:
+  enabled: true
+  auth:
+    username: "app"
+    password: "CHANGE_ME_IN_SEALED_SECRET"
+    database: "app"
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+
+adminer:
+  enabled: false  # Désactivé en production pour la sécurité
+
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+  tls:
+    enabled: true
+

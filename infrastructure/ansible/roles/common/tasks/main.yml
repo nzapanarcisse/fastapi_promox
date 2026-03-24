@@ -1,0 +1,100 @@
+---
+###############################################################################
+# Rôle common - Configuration de base de toutes les VMs
+# - Mise à jour du système
+# - Installation des paquets prérequis
+# - Désactivation du swap (requis par Kubernetes)
+# - Configuration des modules noyau et paramètres réseau
+###############################################################################
+
+- name: Mise à jour du cache APT
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Mise à jour de tous les paquets
+  apt:
+    upgrade: dist
+    force_apt_get: yes
+
+- name: Installation des paquets prérequis
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+      - nfs-common
+      - open-iscsi
+      - jq
+      - unzip
+      - bash-completion
+      - net-tools
+      - ipvsadm
+    state: present
+
+- name: Désactivation du swap (requis par Kubernetes)
+  command: swapoff -a
+  changed_when: false
+
+- name: Suppression du swap dans /etc/fstab (persistance après reboot)
+  lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+
+- name: Chargement des modules noyau nécessaires
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Persistance des modules noyau
+  copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/k8s.conf
+
+- name: Configuration des paramètres sysctl pour Kubernetes
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/k8s.conf
+    reload: yes
+  loop:
+    - { key: "net.bridge.bridge-nf-call-iptables", value: "1" }
+    - { key: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+    - { key: "net.ipv4.ip_forward", value: "1" }
+
+- name: Configuration du hostname
+  hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Configuration du fichier /etc/hosts avec les IPs du cluster
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ item }}"
+    state: present
+  loop:
+    - "{{ k8s_master_ip }} k8s-master"
+    - "{{ k8s_worker_ips[0] }} k8s-worker-1"
+    - "{{ k8s_worker_ips[1] }} k8s-worker-2"
+
+- name: Configuration du firewall - autoriser le trafic interne du cluster
+  ufw:
+    rule: allow
+    from_ip: "10.10.10.0/24"
+    comment: "Kubernetes cluster internal traffic"
+  when: ansible_facts['os_family'] == 'Debian'
+  ignore_errors: yes
+
+- name: Redémarrage si nécessaire
+  reboot:
+    reboot_timeout: 300
+  when: reboot_required is defined and reboot_required
+

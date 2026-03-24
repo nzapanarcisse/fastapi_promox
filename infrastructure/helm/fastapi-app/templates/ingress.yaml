@@ -1,0 +1,66 @@
+###############################################################################
+# Ingress - Routage externe via Traefik avec TLS (Let's Encrypt)
+# - api.DOMAIN       → Backend FastAPI (port 8000)
+# - dashboard.DOMAIN → Frontend React/Nginx (port 80)
+# - adminer.DOMAIN   → Adminer DB Admin (port 8080)
+###############################################################################
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fastapi-app-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fastapi-app.labels" . | nindent 4 }}
+  annotations:
+    {{- toYaml .Values.ingress.annotations | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - "api.{{ .Values.global.domain }}"
+        - "dashboard.{{ .Values.global.domain }}"
+        {{- if .Values.adminer.enabled }}
+        - "adminer.{{ .Values.global.domain }}"
+        {{- end }}
+      secretName: fastapi-app-tls
+  {{- end }}
+  rules:
+    # Backend API
+    - host: "api.{{ .Values.global.domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-backend
+                port:
+                  number: {{ .Values.backend.port }}
+    # Frontend Dashboard
+    - host: "dashboard.{{ .Values.global.domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-frontend
+                port:
+                  number: {{ .Values.frontend.port }}
+    {{- if .Values.adminer.enabled }}
+    # Adminer DB Admin
+    - host: "adminer.{{ .Values.global.domain }}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-adminer
+                port:
+                  number: {{ .Values.adminer.port }}
+    {{- end }}
+{{- end }}
+

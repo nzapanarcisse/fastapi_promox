@@ -1,0 +1,226 @@
+---
+###############################################################################
+# Rôle k8s-components - Installation des composants du cluster Kubernetes
+# - Gateway API CRDs
+# - Traefik (Ingress Controller / Gateway API)
+# - Cert-Manager + Let's Encrypt (ClusterIssuer)
+# - ArgoCD (GitOps)
+# - Karpenter (Autoscaling horizontal)
+# - Metrics Server
+###############################################################################
+
+# ---- Gateway API CRDs ----
+- name: Installation des CRDs Gateway API
+  shell: |
+    kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml
+  register: gateway_api_result
+  changed_when: "'created' in gateway_api_result.stdout or 'configured' in gateway_api_result.stdout"
+
+# ---- Metrics Server (nécessaire pour HPA/Karpenter) ----
+- name: Installation du Metrics Server
+  block:
+    - name: Ajout du repo Helm metrics-server
+      command: helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Mise à jour des repos Helm
+      command: helm repo update
+      changed_when: false
+
+    - name: Installation du Metrics Server
+      shell: |
+        helm upgrade --install metrics-server metrics-server/metrics-server \
+          --namespace kube-system \
+          --set args[0]="--kubelet-insecure-tls" \
+          --set args[1]="--kubelet-preferred-address-types=InternalIP" \
+          --wait --timeout 300s
+      register: metrics_result
+      changed_when: "'has been upgraded' in metrics_result.stdout or 'has been installed' in metrics_result.stdout"
+
+# ---- Traefik v3 (Ingress Controller avec support Gateway API) ----
+- name: Installation de Traefik
+  block:
+    - name: Ajout du repo Helm Traefik
+      command: helm repo add traefik https://traefik.github.io/charts
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Mise à jour des repos Helm
+      command: helm repo update
+      changed_when: false
+
+    - name: Création du namespace traefik
+      command: kubectl create namespace traefik
+      register: ns_traefik
+      changed_when: "'created' in ns_traefik.stdout"
+      failed_when: ns_traefik.rc != 0 and 'already exists' not in ns_traefik.stderr
+
+    - name: Copie des valeurs Traefik
+      template:
+        src: traefik-values.yml.j2
+        dest: /tmp/traefik-values.yml
+
+    - name: Installation de Traefik via Helm
+      shell: |
+        helm upgrade --install traefik traefik/traefik \
+          --namespace traefik \
+          --version {{ traefik_chart_version }} \
+          -f /tmp/traefik-values.yml \
+          --wait --timeout 300s
+      register: traefik_result
+      changed_when: "'has been upgraded' in traefik_result.stdout or 'has been installed' in traefik_result.stdout"
+
+# ---- Cert-Manager ----
+- name: Installation de Cert-Manager
+  block:
+    - name: Ajout du repo Helm Jetstack (Cert-Manager)
+      command: helm repo add jetstack https://charts.jetstack.io
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Mise à jour des repos Helm
+      command: helm repo update
+      changed_when: false
+
+    - name: Création du namespace cert-manager
+      command: kubectl create namespace cert-manager
+      register: ns_certmanager
+      changed_when: "'created' in ns_certmanager.stdout"
+      failed_when: ns_certmanager.rc != 0 and 'already exists' not in ns_certmanager.stderr
+
+    - name: Installation de Cert-Manager via Helm
+      shell: |
+        helm upgrade --install cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --version {{ cert_manager_version }} \
+          --set crds.enabled=true \
+          --set prometheus.enabled=false \
+          --wait --timeout 300s
+      register: certmanager_result
+      changed_when: "'has been upgraded' in certmanager_result.stdout or 'has been installed' in certmanager_result.stdout"
+
+    - name: Attente que Cert-Manager soit prêt
+      shell: kubectl -n cert-manager rollout status deployment cert-manager-webhook
+      retries: 10
+      delay: 15
+      register: cm_ready
+      until: cm_ready.rc == 0
+
+    - name: Création du ClusterIssuer Let's Encrypt (production)
+      template:
+        src: cluster-issuer.yml.j2
+        dest: /tmp/cluster-issuer.yml
+
+    - name: Application du ClusterIssuer Let's Encrypt
+      command: kubectl apply -f /tmp/cluster-issuer.yml
+      register: issuer_result
+      changed_when: "'created' in issuer_result.stdout or 'configured' in issuer_result.stdout"
+
+    - name: Création du ClusterIssuer Let's Encrypt (staging - pour tests)
+      template:
+        src: cluster-issuer-staging.yml.j2
+        dest: /tmp/cluster-issuer-staging.yml
+
+    - name: Application du ClusterIssuer Let's Encrypt staging
+      command: kubectl apply -f /tmp/cluster-issuer-staging.yml
+      register: issuer_staging_result
+      changed_when: "'created' in issuer_staging_result.stdout or 'configured' in issuer_staging_result.stdout"
+
+# ---- ArgoCD ----
+- name: Installation d'ArgoCD
+  block:
+    - name: Ajout du repo Helm ArgoCD
+      command: helm repo add argo https://argoproj.github.io/argo-helm
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Mise à jour des repos Helm
+      command: helm repo update
+      changed_when: false
+
+    - name: Création du namespace argocd
+      command: kubectl create namespace argocd
+      register: ns_argocd
+      changed_when: "'created' in ns_argocd.stdout"
+      failed_when: ns_argocd.rc != 0 and 'already exists' not in ns_argocd.stderr
+
+    - name: Copie des valeurs ArgoCD
+      template:
+        src: argocd-values.yml.j2
+        dest: /tmp/argocd-values.yml
+
+    - name: Installation d'ArgoCD via Helm
+      shell: |
+        helm upgrade --install argocd argo/argo-cd \
+          --namespace argocd \
+          --version {{ argocd_chart_version }} \
+          -f /tmp/argocd-values.yml \
+          --wait --timeout 600s
+      register: argocd_result
+      changed_when: "'has been upgraded' in argocd_result.stdout or 'has been installed' in argocd_result.stdout"
+
+    - name: Récupération du mot de passe admin ArgoCD
+      shell: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+      register: argocd_password
+      changed_when: false
+      retries: 5
+      delay: 10
+      until: argocd_password.rc == 0
+
+    - name: Affichage du mot de passe admin ArgoCD
+      debug:
+        msg: "ArgoCD Admin Password: {{ argocd_password.stdout }}"
+
+# ---- Karpenter-like Autoscaling (Cluster Autoscaler adapté on-premise) ----
+# Note: Karpenter est conçu pour les clouds publics (AWS). Sur Proxmox/on-premise,
+# on utilise le Horizontal Pod Autoscaler (HPA) + Cluster Proportional Autoscaler
+- name: Configuration de l'autoscaling horizontal
+  block:
+    - name: Création du namespace autoscaling
+      command: kubectl create namespace autoscaling
+      register: ns_autoscaling
+      changed_when: "'created' in ns_autoscaling.stdout"
+      failed_when: ns_autoscaling.rc != 0 and 'already exists' not in ns_autoscaling.stderr
+
+    - name: Copie de la configuration HPA par défaut
+      template:
+        src: default-hpa.yml.j2
+        dest: /tmp/default-hpa.yml
+
+    - name: Application de la configuration HPA
+      command: kubectl apply -f /tmp/default-hpa.yml
+      register: hpa_result
+      changed_when: "'created' in hpa_result.stdout or 'configured' in hpa_result.stdout"
+
+# ---- Création du namespace applicatif ----
+- name: Création du namespace pour l'application FastAPI
+  command: kubectl create namespace fastapi-app
+  register: ns_fastapi
+  changed_when: "'created' in ns_fastapi.stdout"
+  failed_when: ns_fastapi.rc != 0 and 'already exists' not in ns_fastapi.stderr
+
+# ---- Résumé ----
+- name: Affichage du résumé d'installation
+  debug:
+    msg: |
+      ============================================================
+      Cluster Kubernetes configuré avec succès !
+      ============================================================
+      Master: {{ k8s_master_ip }}
+      Workers: {{ k8s_worker_ips | join(', ') }}
+      Domaine: {{ domain }}
+      
+      Composants installés :
+        ✅ Gateway API CRDs
+        ✅ Metrics Server
+        ✅ Traefik v3 ({{ traefik_chart_version }})
+        ✅ Cert-Manager ({{ cert_manager_version }})
+        ✅ Let's Encrypt ClusterIssuer (prod + staging)
+        ✅ ArgoCD ({{ argocd_chart_version }})
+        ✅ HPA Autoscaling
+      
+      ArgoCD Admin Password: {{ argocd_password.stdout }}
+      ArgoCD URL: https://argocd.{{ domain }}
+      ============================================================
+

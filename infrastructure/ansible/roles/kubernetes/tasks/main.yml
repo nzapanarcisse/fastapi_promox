@@ -1,0 +1,100 @@
+---
+###############################################################################
+# Rôle kubernetes - Installation de containerd + kubeadm/kubelet/kubectl
+# - Installation du runtime de conteneurs (containerd)
+# - Configuration de containerd pour utiliser systemd cgroup
+# - Installation de kubeadm, kubelet, kubectl depuis le dépôt officiel
+###############################################################################
+
+- name: Installation de containerd
+  block:
+    - name: Ajout de la clé GPG Docker
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Ajout du dépôt Docker (pour containerd)
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+    - name: Installation de containerd.io
+      apt:
+        name: "containerd.io"
+        state: present
+        update_cache: yes
+
+    - name: Création du répertoire de configuration containerd
+      file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Génération de la configuration par défaut de containerd
+      shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Configuration de containerd pour utiliser systemd cgroup driver
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Redémarrage et activation de containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+- name: Installation de Kubernetes (kubeadm, kubelet, kubectl)
+  block:
+    - name: Création du répertoire pour les clés APT
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Téléchargement de la clé GPG Kubernetes
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Ajout du dépôt Kubernetes
+      copy:
+        content: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /\n"
+        dest: /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Installation de kubeadm, kubelet et kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: yes
+
+    - name: Marquage des paquets Kubernetes pour empêcher les mises à jour automatiques
+      dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Activation de kubelet
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: started
+
+    - name: Activation de l'autocomplétion kubectl
+      shell: |
+        kubectl completion bash > /etc/bash_completion.d/kubectl
+      args:
+        creates: /etc/bash_completion.d/kubectl
+      ignore_errors: yes
+
