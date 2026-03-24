@@ -379,7 +379,7 @@ jobs:
         continue-on-error: true
 
       - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
+        uses: azure/setup-kubectl@v4
 
       - name: Configuration de kubectl
         run: |
