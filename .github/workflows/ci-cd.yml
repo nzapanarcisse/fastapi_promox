@@ -136,14 +136,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download Ansible inventory (depuis Terraform)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ansible-inventory
           path: infrastructure/ansible/inventory/
         continue-on-error: true
 
       - name: Download Ansible group_vars (depuis Terraform)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ansible-vars
           path: infrastructure/ansible/group_vars/
@@ -372,7 +372,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download kubeconfig
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: kubeconfig
           path: ./
