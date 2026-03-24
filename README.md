@@ -165,54 +165,415 @@ infrastructure/
 
 Connectez-vous en SSH au serveur Proxmox et exécutez :
 
+#### 1. Identifier le pool de stockage disponible
+
+Chaque installation Proxmox a des noms de stockage différents. Avant tout, identifiez le vôtre :
+
 ```bash
-# Téléchargement de l'image cloud Ubuntu 22.04
+pvesm status
+```
+
+Exemple de sortie :
+```
+Name          Type     Status           Total            Used       Available        %
+local          dir     active        53733704         6962500        44009272   12.96%
+vmdata     zfspool     active      5653921792             564      5653921228    0.00%
+```
+
+> **⚠️ IMPORTANT** : Repérez le stockage de type `zfspool`, `lvmthin` ou `lvm` — c'est celui qui hébergera les disques des VMs.
+> Dans les commandes ci-dessous, **remplacez `<STORAGE>` par le nom de votre stockage** (ex: `vmdata`, `local-lvm`, `local-zfs`, etc.)
+
+#### 2. Créer le template
+
+##### Pourquoi une image "cloud" et pas une ISO classique ?
+
+| | Image ISO classique | Image Cloud |
+|---|---|---|
+| **Installation** | Manuelle (écran, clavier, clics, partitionnement...) | Aucune — le système est **pré-installé** |
+| **Taille** | ~2 Go | ~600 Mo (légère) |
+| **Cloud-init** | ❌ Absent | ✅ **Intégré** — c'est la clé de l'automatisation |
+| **Automatisable** | ❌ Difficile | ✅ Conçue pour ça |
+| **Cas d'usage** | Installation manuelle sur un PC | Déploiement automatisé (cloud, Terraform, etc.) |
+
+**Cloud-init** est un outil embarqué dans l'image cloud qui, **au premier démarrage**, configure automatiquement :
+- Le nom d'hôte (hostname)
+- L'adresse IP et la gateway
+- Les clés SSH autorisées
+- L'utilisateur et son mot de passe
+- Les paquets à installer, les scripts à exécuter, etc.
+
+C'est grâce à cloud-init que **Terraform peut injecter la configuration réseau et SSH sans aucune intervention humaine**.
+
+##### Pourquoi un template (et pas créer les VMs directement) ?
+
+Un template est un **modèle en lecture seule** qu'on clone pour créer des VMs :
+
+```
+Template (ID 9000)  ──clone──►  VM k8s-master    (10.10.10.10)
+  (créé 1 seule     ──clone──►  VM k8s-worker-1  (10.10.10.11)
+   fois)             ──clone──►  VM k8s-worker-2  (10.10.10.12)
+```
+
+Sans template, il faudrait installer Ubuntu manuellement sur chaque VM.
+Avec le template, Terraform clone en quelques secondes et cloud-init personnalise chaque VM.
+
+##### Commandes
+
+```bash
+# ============================================================================
+# ÉTAPE 2a : TÉLÉCHARGER L'IMAGE CLOUD UBUNTU
+# ============================================================================
+# On se place dans le dossier où Proxmox stocke les images ISO et templates
+# C'est le chemin standard de Proxmox pour ce type de fichier
 cd /var/lib/vz/template/iso/
+
+# On télécharge l'image cloud d'Ubuntu 22.04 LTS (nom de code "Jammy Jellyfish")
+# - "cloud" = image pré-installée avec cloud-init intégré
+# - "amd64" = architecture processeur 64 bits (la plus courante)
+# - C'est un fichier .img (image disque), PAS un .iso (installateur)
+# - Taille : ~600 Mo vs ~2 Go pour une ISO classique
 wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
 
-# Création de la VM template (ID 9000)
+# ============================================================================
+# ÉTAPE 2b : CRÉER UNE VM VIDE (la "coquille")
+# ============================================================================
+# qm = "QEMU Manager" — l'outil en ligne de commande de Proxmox pour gérer les VMs
+# create 9000 = crée une VM avec l'ID 9000
+#   → On utilise 9000 par convention pour les templates (IDs élevés = templates)
+#   → Les VMs réelles utiliseront des IDs plus bas (100, 101, 102...)
+#
+# --name ubuntu-2204-cloud = nom lisible dans l'interface Proxmox
+# --memory 2048 = 2 Go de RAM (valeur par défaut, sera modifiée par Terraform au clonage)
+# --cores 2 = 2 cœurs CPU (idem, modifiable par Terraform)
+# --net0 virtio,bridge=vmbr0 = une carte réseau virtuelle :
+#   → "virtio" = pilote réseau paravirtualisé (le plus performant en VM)
+#   → "bridge=vmbr0" = connectée au bridge principal de Proxmox
+#
+# ⚠️ À ce stade, la VM est VIDE — pas de disque, pas d'OS. C'est juste une "boîte".
 qm create 9000 --name ubuntu-2204-cloud --memory 2048 --cores 2 --net0 virtio,bridge=vmbr0
 
-# Import du disque
-qm importdisk 9000 jammy-server-cloudimg-amd64.img local-lvm
+# ============================================================================
+# ÉTAPE 2c : IMPORTER LE DISQUE (mettre Ubuntu dans la VM)
+# ============================================================================
+# Cette commande prend l'image .img téléchargée et la convertit en disque virtuel
+# exploitable par Proxmox, puis la stocke dans le pool de stockage.
+#
+# → Remplacez <STORAGE> par le nom trouvé avec "pvesm status" (ex: vmdata, local-lvm)
+#
+# Analogie : c'est comme installer un disque dur SSD (avec Ubuntu pré-installé)
+#            dans un ordinateur vide.
+#
+# ⚠️ À ce stade le disque est importé mais PAS ENCORE BRANCHÉ à la VM
+qm importdisk 9000 jammy-server-cloudimg-amd64.img <STORAGE>
 
-# Configuration du disque
-qm set 9000 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9000-disk-0
+# ============================================================================
+# ÉTAPE 2d : BRANCHER LE DISQUE À LA VM
+# ============================================================================
+# --scsihw virtio-scsi-pci = utilise le contrôleur de disque VirtIO SCSI
+#   → C'est le contrôleur le plus performant pour la virtualisation
+#   → Meilleur que IDE ou SATA en termes de débit et latence
+#
+# --scsi0 <STORAGE>:vm-9000-disk-0 = branche le disque importé sur le port SCSI 0
+#   → "scsi0" = premier emplacement de disque
+#   → "vm-9000-disk-0" = nom du disque créé automatiquement lors de l'import
+#
+# Analogie : on branche le câble entre la carte mère et le disque dur.
+#            Maintenant la VM peut démarrer depuis ce disque.
+qm set 9000 --scsihw virtio-scsi-pci --scsi0 <STORAGE>:vm-9000-disk-0
 
-# Configuration cloud-init
-qm set 9000 --ide2 local-lvm:cloudinit
+# ============================================================================
+# ÉTAPE 2e : AJOUTER LE DISQUE CLOUD-INIT
+# ============================================================================
+# Cette commande crée un PETIT disque virtuel spécial dédié à cloud-init.
+# Ce disque ne contient PAS l'OS, il contient uniquement les PARAMÈTRES de config :
+#   - Hostname, IP, gateway, DNS
+#   - Clés SSH autorisées
+#   - Utilisateur à créer
+#   - Scripts à exécuter au premier démarrage
+#
+# Fonctionnement :
+# ┌─────────────────┐     ┌──────────────────┐
+# │ Disque Ubuntu   │     │ Disque Cloud-Init│
+# │ (scsi0)         │     │ (ide2)           │
+# │                 │     │                  │
+# │ Le système      │◄────│ hostname: k8s-1  │
+# │ Ubuntu démarre  │ lit │ ip: 10.10.10.10  │
+# │ et lit les      │     │ ssh_key: xxx     │
+# │ paramètres      │     │ user: k8sadmin   │
+# └─────────────────┘     └──────────────────┘
+#
+# C'est Terraform qui écrira les valeurs dans ce disque au moment du clonage.
+# → ide2 = emplacement IDE secondaire (convention Proxmox pour cloud-init)
+qm set 9000 --ide2 <STORAGE>:cloudinit
+
+# ============================================================================
+# ÉTAPE 2f : CONFIGURER LE DÉMARRAGE
+# ============================================================================
+# --boot c = boot depuis le disque dur ("c" = HDD, comme dans un BIOS)
+#   → Pas de boot réseau (PXE), pas de boot CD/DVD
+# --bootdisk scsi0 = le disque de démarrage est celui branché à l'étape 2d
+#
+# Analogie : dans le BIOS, on sélectionne "Démarrer depuis le disque dur"
 qm set 9000 --boot c --bootdisk scsi0
+
+# ============================================================================
+# ÉTAPE 2g : CONFIGURER LA CONSOLE SÉRIE
+# ============================================================================
+# Les images cloud n'ont PAS d'interface graphique (pas de bureau, pas d'écran).
+# Elles sont conçues pour être utilisées uniquement en SSH.
+#
+# --serial0 socket = ajoute un port série virtuel (comme un câble série RS-232)
+# --vga serial0 = redirige l'affichage vers ce port série
+#
+# Pourquoi ? Cela permet d'avoir une console TEXTE dans l'interface web Proxmox
+# (bouton "Console" → "xterm.js"). Très utile pour le debug si SSH ne marche pas.
+# Sans ça, l'écran de la VM dans Proxmox resterait noir.
 qm set 9000 --serial0 socket --vga serial0
 
-# Installation de l'agent QEMU (important pour Terraform)
+# ============================================================================
+# ÉTAPE 2h : ACTIVER L'AGENT QEMU
+# ============================================================================
+# L'agent QEMU (qemu-guest-agent) est un petit programme qui tourne DANS la VM
+# et communique avec l'hyperviseur Proxmox.
+#
+# Il permet à Proxmox (et donc à Terraform) de :
+#   ✅ Connaître la VRAIE adresse IP de la VM (pas juste celle configurée)
+#   ✅ Savoir quand la VM a fini de démarrer
+#   ✅ Exécuter des commandes dans la VM (freeze/thaw pour les snapshots)
+#   ✅ Arrêter proprement la VM (shutdown graceful)
+#
+# ⚠️ IMPORTANT pour Terraform : sans l'agent, Terraform ne peut pas vérifier
+# que la VM est prête après le clonage → il échoue ou attend indéfiniment.
+#
+# Note : l'agent est déjà pré-installé dans les images cloud Ubuntu.
+# Cette commande dit juste à Proxmox "attends-toi à ce que l'agent soit disponible".
 qm set 9000 --agent enabled=1
 
-# Conversion en template
+# ============================================================================
+# ÉTAPE 2i : CONVERTIR EN TEMPLATE (verrouiller le modèle)
+# ============================================================================
+# Cette commande transforme la VM 9000 en TEMPLATE :
+#   🔒 Elle n'est PLUS démarrable directement
+#   🔒 Elle n'est PLUS modifiable
+#   🔒 Elle est en LECTURE SEULE
+#   ✅ Elle est prête à être CLONÉE autant de fois que nécessaire
+#
+# Analogie : comme mettre un document Word en "lecture seule".
+#            On ne peut plus le modifier, mais on peut en faire des copies.
+#
+# Après cette commande, dans l'interface Proxmox, l'icône de la VM change
+# pour indiquer que c'est un template (icône avec un petit document).
 qm template 9000
+```
+
+> **Exemple concret** : Si `pvesm status` affiche `vmdata` comme stockage ZFS, les commandes deviennent :
+> ```bash
+> qm importdisk 9000 jammy-server-cloudimg-amd64.img vmdata
+> qm set 9000 --scsihw virtio-scsi-pci --scsi0 vmdata:vm-9000-disk-0
+> qm set 9000 --ide2 vmdata:cloudinit
+> ```
+
+##### Récapitulatif visuel
+
+```
+ÉTAPE 2a : wget image cloud ──────────────┐ (télécharger Ubuntu)
+                                           ▼
+ÉTAPE 2b : qm create 9000 ──► VM vide     │ (créer la boîte)
+                                │          │
+ÉTAPE 2c : qm importdisk ──────┘  disque ◄┘ (mettre l'OS dans le stockage)
+                                               
+ÉTAPE 2d : qm set scsi0  ──► branche le disque Ubuntu à la VM
+ÉTAPE 2e : qm set ide2   ──► ajoute le disque cloud-init (paramètres)
+ÉTAPE 2f : qm set boot   ──► configure le démarrage sur le bon disque
+ÉTAPE 2g : qm set serial ──► ajoute une console texte (debug)
+ÉTAPE 2h : qm set agent  ──► active la communication VM ↔ Proxmox
+                                               
+ÉTAPE 2i : qm template   ──► 🔒 VERROUILLÉ = TEMPLATE PRÊT
+                                     │
+                            Terraform clone ici
+                              ┌──────┼──────┐
+                              ▼      ▼      ▼
+                           Master  Worker1  Worker2
 ```
 
 ### Configuration du NAT sur Proxmox (accès Internet pour le sous-réseau privé)
 
+#### Pourquoi un bridge privé (vmbr1) ?
+
+Par défaut, Proxmox dispose d'un seul bridge `vmbr0` connecté directement à Internet avec l'IP publique du serveur (51.158.200.50). Le problème :
+
+```
+SANS bridge privé (vmbr0 seul) :
+┌──────────────────────────────────────────────┐
+│  Proxmox (vmbr0 = IP publique)               │
+│                                               │
+│   VM1 (IP publique ?)  ← Il faudrait une     │
+│   VM2 (IP publique ?)  ← IP publique par VM  │
+│   VM3 (IP publique ?)  ← = coûteux + exposé  │
+└──────────────────────────────────────────────┘
+❌ Problèmes :
+   - Il faudrait acheter 3 IPs publiques supplémentaires
+   - Chaque VM est directement exposée sur Internet (risque sécurité)
+   - Pas de réseau privé entre les VMs
+```
+
+```
+AVEC bridge privé (vmbr1) :
+┌──────────────────────────────────────────────────────┐
+│  Proxmox                                              │
+│  vmbr0 (51.158.200.50) ← seul point d'entrée public │
+│       │                                               │
+│       │ NAT (translation d'adresses)                  │
+│       │                                               │
+│  vmbr1 (10.10.10.1/24) ← réseau privé isolé         │
+│       │                                               │
+│   ┌───┴────┬───────────┬───────────┐                 │
+│   │ Master │ Worker-1  │ Worker-2  │                 │
+│   │ .10    │ .11       │ .12       │                 │
+│   └────────┴───────────┴───────────┘                 │
+└──────────────────────────────────────────────────────┘
+✅ Avantages :
+   - 1 seule IP publique suffit (le serveur Proxmox)
+   - Les VMs communiquent entre elles sur le réseau privé (rapide)
+   - Les VMs ne sont PAS directement exposées sur Internet (sécurité)
+   - Le NAT permet aux VMs d'accéder à Internet (pour apt, docker pull, etc.)
+   - C'est exactement comme votre box Internet à la maison (192.168.x.x)
+```
+
+#### Comment configurer
+
+Sur le serveur Proxmox, éditez le fichier `/etc/network/interfaces` :
+
 ```bash
-# Sur le serveur Proxmox, éditer /etc/network/interfaces
-# Ajouter un bridge privé si nécessaire :
+nano /etc/network/interfaces
+```
+
+Ajoutez le bloc suivant **à la fin du fichier** :
+
+```bash
+# ============================================================================
+# BRIDGE PRIVÉ vmbr1 - Réseau interne pour les VMs Kubernetes
+# ============================================================================
+# Ce bridge crée un réseau local isolé (comme un switch virtuel)
+# Les VMs y seront connectées avec des IPs privées 10.10.10.x
+# Proxmox sert de routeur/gateway pour donner Internet aux VMs via NAT
 
 auto vmbr1
 iface vmbr1 inet static
-    address 10.10.10.1/24
-    bridge-ports none
-    bridge-stp off
-    bridge-fd 0
-    post-up   iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
-    post-down iptables -t nat -D POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
 
-# Activer le forwarding IP
+    # L'IP du bridge = la gateway pour les VMs
+    # Les VMs utiliseront 10.10.10.1 comme passerelle par défaut
+    address 10.10.10.1/24
+
+    # bridge-ports none = ce bridge n'est connecté à aucune carte réseau physique
+    # C'est un réseau purement virtuel (interne à Proxmox)
+    bridge-ports none
+
+    # bridge-stp off = désactive le Spanning Tree Protocol
+    # Pas nécessaire car il n'y a pas de boucle réseau possible
+    bridge-stp off
+
+    # bridge-fd 0 = forwarding delay à 0 seconde
+    # Le bridge est opérationnel immédiatement au démarrage (pas d'attente)
+    bridge-fd 0
+
+    # ===== RÈGLE NAT (Network Address Translation) =====
+    # C'est LA règle clé qui permet aux VMs d'accéder à Internet
+    #
+    # Comment ça marche :
+    #   - Une VM (10.10.10.10) veut aller sur Internet (ex: apt update)
+    #   - Le paquet arrive sur vmbr1 (gateway 10.10.10.1)
+    #   - iptables REMPLACE l'IP source 10.10.10.10 par l'IP publique 51.158.200.50
+    #   - Le paquet sort sur Internet via vmbr0
+    #   - La réponse revient, iptables redirige vers la VM d'origine
+    #
+    # POSTROUTING = on modifie le paquet APRÈS le routage (juste avant qu'il sorte)
+    # -s 10.10.10.0/24 = seulement les paquets venant du réseau privé
+    # -o vmbr0 = seulement les paquets qui sortent vers Internet (via vmbr0)
+    # -j MASQUERADE = remplace l'IP source par celle de vmbr0 (IP publique)
+    post-up   iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
+
+    # Nettoyage : supprime la règle NAT quand le bridge est arrêté
+    post-down iptables -t nat -D POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
+```
+
+Ensuite, activez le forwarding IP et redémarrez le réseau :
+
+```bash
+# ===== ACTIVER LE FORWARDING IP =====
+# Par défaut, Linux ne transfère PAS les paquets entre ses interfaces réseau.
+# Il faut activer le "forwarding" pour que Proxmox fasse office de routeur
+# entre vmbr1 (réseau privé) et vmbr0 (Internet).
+#
+# Sans ça, les paquets des VMs arrivent sur vmbr1 mais ne sont jamais
+# transférés vers vmbr0 → les VMs n'ont pas Internet.
+
+# Activation immédiate (effet temporaire, perdu au reboot)
 echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# Activation permanente (persiste après un reboot)
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+# Recharger la configuration sysctl pour appliquer sans reboot
 sysctl -p
 
-# Redémarrer le réseau
+# Redémarrer le réseau pour activer le bridge vmbr1
 systemctl restart networking
+
+# ===== VÉRIFICATION =====
+# Vérifier que vmbr1 existe et a l'IP 10.10.10.1
+ip addr show vmbr1
+
+# Vérifier que le forwarding est actif (doit afficher "1")
+cat /proc/sys/net/ipv4/ip_forward
+
+# Vérifier que la règle NAT est en place
+iptables -t nat -L POSTROUTING -v
+```
+
+#### Résumé du flux réseau
+
+```
+VM (10.10.10.10) veut faire "apt update" :
+
+1. VM envoie le paquet → destination: archive.ubuntu.com
+   source: 10.10.10.10 (IP privée)
+
+2. Le paquet arrive sur vmbr1 (gateway 10.10.10.1)
+
+3. Le forwarding IP transfère le paquet de vmbr1 → vmbr0
+
+4. La règle NAT MASQUERADE remplace :
+   source: 10.10.10.10 → source: 51.158.200.50 (IP publique)
+
+5. Le paquet sort sur Internet
+
+6. La réponse revient à 51.158.200.50
+
+7. iptables se souvient et redirige vers 10.10.10.10
+
+8. La VM reçoit la réponse ✅
+```
+
+### Configuration de l'accès SSH (sur votre machine locale)
+
+```bash
+# 1. Générer une clé SSH si ce n'est pas fait
+ssh-keygen -t ed25519 -f ~/.ssh/proxmox_key
+
+# 2. Afficher votre clé publique
+cat ~/.ssh/proxmox_key.pub
+
+# 3. Sur la console Web Proxmox (https://51.158.200.50:8006 → Shell),
+#    collez ces commandes pour autoriser votre clé :
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+# ⚠️ Remplacez la clé ci-dessous par VOTRE propre clé publique (résultat de cat ~/.ssh/proxmox_key.pub)
+echo "VOTRE_CLE_PUBLIQUE_ICI" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+
+# 4. Testez la connexion depuis votre machine locale
+ssh -i ~/.ssh/proxmox_key root@IP_PROXMOX
 ```
 
 > **⚠️ IMPORTANT** : Si vos VMs utilisent le bridge `vmbr0` directement avec des IPs publiques ou un DHCP, adaptez `network_bridge` dans `terraform.tfvars` et la gateway en conséquence. Le NAT n'est nécessaire que si vous utilisez un sous-réseau privé.
@@ -228,10 +589,30 @@ cd infrastructure/terraform/
 
 # Éditez terraform.tfvars avec vos valeurs réelles
 # IMPORTANT : Remplacez les valeurs suivantes :
-#   - ssh_public_key : votre clé SSH publique (cat ~/.ssh/k8s_proxmox.pub)
-#   - domain : votre nom de domaine réel
-#   - acme_email : votre email pour Let's Encrypt
-#   - Les IPs si votre réseau est différent
+#
+#   - proxmox_node : le hostname de votre serveur Proxmox
+#     → Pour le trouver, connectez-vous en SSH au serveur et tapez : hostname
+#     → Ou dans l'interface Web Proxmox (https://IP:8006), panneau gauche sous "Datacenter"
+#     → Par défaut c'est "pve", mais ça peut varier (ex: "sd-178488")
+#
+#   - ssh_public_key : votre clé SSH PUBLIQUE (PAS la clé privée !)
+#     → Pour la récupérer : cat ~/.ssh/proxmox_key.pub
+#     → C'est une SEULE ligne qui commence par "ssh-ed25519 AAAA..." ou "ssh-rsa AAAA..."
+#     → ⚠️ Ne mettez JAMAIS la clé privée (celle sans .pub) ici
+#
+#   - storage_pool : le nom du pool de stockage Proxmox pour les disques des VMs
+#     → Pour le trouver, sur le serveur Proxmox tapez : pvesm status
+#     → Repérez le stockage de type zfspool, lvmthin ou lvm (ex: "vmdata", "local-lvm")
+#
+#   - proxmox_password : le mot de passe de connexion à l'API Proxmox
+#
+#   - domain : votre nom de domaine réel (ex: "onlineboutique.ip-ddns.com")
+#
+#   - acme_email : votre email pour les certificats Let's Encrypt
+#
+#   - network_bridge : le bridge réseau Proxmox (par défaut "vmbr0", ou "vmbr1" si réseau privé)
+#
+#   - Les IPs (master_ip, worker_ips, gateway_ip) : adaptez si votre réseau est différent
 ```
 
 ### ÉTAPE 2 : Provisioning de l'infrastructure (Terraform)
@@ -254,8 +635,11 @@ terraform plan -var-file=terraform.tfvars
 #   4. Générer automatiquement l'inventaire Ansible
 terraform apply -var-file=terraform.tfvars
 
-# Vérification des outputs
+# Vérification des outputs (affiche les IPs, noms, commandes SSH)
 terraform output
+
+# Afficher les commandes SSH pour se connecter aux VMs
+terraform output ssh_commands
 ```
 
 **Ce que fait Terraform ici :**
@@ -265,73 +649,139 @@ terraform output
 - Injecte la clé SSH publique pour l'accès sans mot de passe
 - Génère automatiquement `../ansible/inventory/hosts.ini` et `../ansible/group_vars/all.yml`
 
+#### Gestion du cycle de vie avec Terraform
+
+Terraform gère entièrement le cycle de vie des VMs. **Ne supprimez JAMAIS les VMs
+manuellement** sur Proxmox (via `qm destroy` ou l'interface web) — cela désynchronise
+le state Terraform et crée des conflits.
+
+
 ### ÉTAPE 3 : Vérification de la connectivité SSH
 
-```bash
-# Testez la connexion SSH à chaque VM
-ssh -i ~/.ssh/k8s_proxmox k8sadmin@10.10.10.10  # master
-ssh -i ~/.ssh/k8s_proxmox k8sadmin@10.10.10.11  # worker-1
-ssh -i ~/.ssh/k8s_proxmox k8sadmin@10.10.10.12  # worker-2
+Les VMs sont sur un **réseau privé** (10.10.10.0/24). Votre machine locale ne peut PAS
+les atteindre directement. Il faut **rebondir** par le serveur Proxmox (jump host) :
 
-# Vérifiez que les VMs ont accès à Internet
-ssh -i ~/.ssh/k8s_proxmox k8sadmin@10.10.10.10 "ping -c 3 8.8.8.8"
+```
+Votre PC ──SSH──► Proxmox (51.158.200.50) ──SSH──► VM (10.10.10.x)
+              IP publique                     réseau privé
 ```
 
+L'option `-J` de SSH permet de faire ce rebond automatiquement :
+
+```bash
+# ⚠️ Connexion DIRECTE (ne marche PAS — réseau privé inaccessible) :
+# ssh -i ~/.ssh/proxmox_key k8sadmin@10.10.10.10  ← TIMEOUT !
+
+# ✅ Connexion via JUMP HOST (rebond par Proxmox) :
+# -i ~/.ssh/proxmox_key = clé SSH pour les deux connexions (Proxmox + VM)
+# -J root@51.158.200.50 = passer par Proxmox comme relais
+
+# Master :
+ssh -i ~/.ssh/proxmox_key -J root@51.158.200.50 k8sadmin@10.10.10.10
+
+# Worker-1 :
+ssh -i ~/.ssh/proxmox_key -J root@51.158.200.50 k8sadmin@10.10.10.11
+
+# Worker-2 :
+ssh -i ~/.ssh/proxmox_key -J root@51.158.200.50 k8sadmin@10.10.10.12
+
+# Vérifiez que les VMs ont accès à Internet (via NAT)
+ssh -i ~/.ssh/proxmox_key -J root@51.158.200.50 k8sadmin@10.10.10.10 "ping -c 3 8.8.8.8"
+```
+
+> **💡 Astuce** : Pour simplifier, ajoutez ceci dans `~/.ssh/config` sur votre machine locale :
+> ```
+> # Serveur Proxmox (jump host)
+> Host proxmox
+>     HostName 51.158.200.50
+>     User root
+>     IdentityFile ~/.ssh/proxmox_key
+>
+> # VMs Kubernetes (accès via Proxmox)
+> Host k8s-master
+>     HostName 10.10.10.10
+>     User k8sadmin
+>     IdentityFile ~/.ssh/proxmox_key
+>     ProxyJump proxmox
+>
+> Host k8s-worker-*
+>     User k8sadmin
+>     IdentityFile ~/.ssh/proxmox_key
+>     ProxyJump proxmox
+>
+> Host k8s-worker-1
+>     HostName 10.10.10.11
+>
+> Host k8s-worker-2
+>     HostName 10.10.10.12
+> ```
+> Après ça, il suffit de taper : `ssh k8s-master` ou `ssh k8s-worker-1`
+
 ### ÉTAPE 4 : Installation de Kubernetes (Ansible)
+
+Les VMs sont sur un réseau privé → Ansible doit aussi passer par le **jump host Proxmox**.
+Cette configuration est déjà intégrée dans l'inventaire généré par Terraform (`hosts.ini`)
+grâce au paramètre `ProxyJump` dans `ansible_ssh_common_args`.
 
 ```bash
 cd infrastructure/ansible/
 
 # Vérification de l'inventaire (généré par Terraform)
+# Vous devriez voir le ProxyJump dans [k8s_cluster:vars]
 cat inventory/hosts.ini
 
-# Test de connectivité Ansible (ping toutes les VMs)
-ansible all -i inventory/hosts.ini -m ping --private-key=~/.ssh/k8s_proxmox
+# Test de connectivité Ansible (ping toutes les VMs via le jump host Proxmox)
+# ⚠️ Pas besoin de --private-key ici : il est déjà dans l'inventaire
+ansible all -i inventory/hosts.ini -m ping
+
+# Si le test échoue, vérifiez :
+#   1. Que les VMs sont bien démarrées : ssh sur Proxmox → qm list
+#   2. Que cloud-init a configuré le réseau : ssh sur Proxmox → ping 10.10.10.10
+#   3. Que votre clé SSH est bien copiée sur Proxmox (pour le jump host)
 
 # Exécution du playbook complet
 # Cela prend environ 15-20 minutes
 ansible-playbook site.yml \
   -i inventory/hosts.ini \
-  --private-key=~/.ssh/k8s_proxmox \
   -v
 ```
 
 **Ce que fait Ansible (dans l'ordre) :**
 
 1. **Rôle `common`** (sur toutes les VMs) :
-  - Met à jour le système (apt upgrade)
-  - Installe les paquets prérequis (curl, gnupg, etc.)
-  - Désactive le swap (obligatoire pour Kubernetes)
-  - Configure les modules noyau (overlay, br_netfilter)
-  - Configure sysctl (ip_forward, bridge-nf-call-iptables)
-  - Met à jour /etc/hosts avec les IPs du cluster
+    - Met à jour le système (apt upgrade)
+    - Installe les paquets prérequis (curl, gnupg, etc.)
+    - Désactive le swap (obligatoire pour Kubernetes)
+    - Configure les modules noyau (overlay, br_netfilter)
+    - Configure sysctl (ip_forward, bridge-nf-call-iptables)
+    - Met à jour /etc/hosts avec les IPs du cluster
 
 2. **Rôle `kubernetes`** (sur toutes les VMs) :
-  - Installe containerd comme runtime de conteneurs
-  - Configure containerd pour utiliser systemd cgroup driver
-  - Installe kubeadm, kubelet, kubectl (v1.29)
-  - Verrouille les versions pour éviter les mises à jour accidentelles
+    - Installe containerd comme runtime de conteneurs
+    - Configure containerd pour utiliser systemd cgroup driver
+    - Installe kubeadm, kubelet, kubectl (v1.29)
+    - Verrouille les versions pour éviter les mises à jour accidentelles
 
 3. **Rôle `master`** (sur le master uniquement) :
-  - Initialise le cluster avec `kubeadm init`
-  - Installe le réseau CNI Flannel (pod network)
-  - Configure kubectl pour l'utilisateur
-  - Génère le token de jonction pour les workers
-  - Installe Helm 3
-  - Sauvegarde le kubeconfig localement
+    - Initialise le cluster avec `kubeadm init`
+    - Installe le réseau CNI Flannel (pod network)
+    - Configure kubectl pour l'utilisateur
+    - Génère le token de jonction pour les workers
+    - Installe Helm 3
+    - Sauvegarde le kubeconfig localement
 
 4. **Rôle `worker`** (sur les workers) :
-  - Récupère la commande de jonction depuis le master
-  - Exécute `kubeadm join` pour rejoindre le cluster
+    - Récupère la commande de jonction depuis le master
+    - Exécute `kubeadm join` pour rejoindre le cluster
 
 5. **Rôle `k8s-components`** (sur le master) :
-  - Installe les CRDs Gateway API
-  - Installe Metrics Server (nécessaire pour HPA)
-  - Installe **Traefik v3.2.1** via Helm (Ingress Controller + Gateway API)
-  - Installe **Cert-Manager v1.16.2** via Helm
-  - Crée les ClusterIssuers Let's Encrypt (production + staging)
-  - Installe **ArgoCD v2.13.3** via Helm
-  - Configure les HPAs (Horizontal Pod Autoscaler) pour l'autoscaling
+    - Installe les CRDs Gateway API
+    - Installe Metrics Server (nécessaire pour HPA)
+    - Installe **Traefik v3.2.1** via Helm (Ingress Controller + Gateway API)
+    - Installe **Cert-Manager v1.16.2** via Helm
+    - Crée les ClusterIssuers Let's Encrypt (production + staging)
+    - Installe **ArgoCD v2.13.3** via Helm
+    - Configure les HPAs (Horizontal Pod Autoscaler) pour l'autoscaling
 
 ### ÉTAPE 5 : Vérification du cluster Kubernetes
 
@@ -503,7 +953,7 @@ Le pipeline `.github/workflows/ci-cd.yml` automatise tout le processus :
 | `WORKER_IP_1` | IP du worker 1 | `10.10.10.11` |
 | `WORKER_IP_2` | IP du worker 2 | `10.10.10.12` |
 | `GATEWAY_IP` | IP de la gateway | `10.10.10.1` |
-| `STORAGE_POOL` | Pool de stockage | `local-lvm` |
+| `STORAGE_POOL` | Pool de stockage (trouvez le vôtre avec `pvesm status` sur Proxmox) | `vmdata`, `local-lvm`, `local-zfs`... |
 | `NETWORK_BRIDGE` | Bridge réseau | `vmbr0` |
 | `VM_USER` | Utilisateur VM | `k8sadmin` |
 
@@ -513,16 +963,21 @@ Le pipeline `.github/workflows/ci-cd.yml` automatise tout le processus :
 
 ### Terraform
 ```bash
-terraform plan -var-file=terraform.tfvars    # Prévisualisation
-terraform apply -var-file=terraform.tfvars   # Application
-terraform destroy -var-file=terraform.tfvars # Destruction
-terraform state list                          # Liste des ressources
+terraform plan -var-file=terraform.tfvars    # Prévisualisation (dry-run, ne modifie rien)
+terraform apply -var-file=terraform.tfvars   # Créer/Modifier les ressources
+terraform destroy -var-file=terraform.tfvars # Supprimer TOUTES les ressources proprement
+terraform state list                          # Liste des ressources dans le state
+terraform refresh -var-file=terraform.tfvars # Resynchroniser le state avec Proxmox
+terraform output                              # Afficher les outputs (IPs, commandes SSH)
+terraform output ssh_commands                 # Afficher les commandes SSH uniquement
 ```
 
 ### Ansible
 ```bash
+# La clé SSH et le ProxyJump sont déjà configurés dans l'inventaire hosts.ini
 ansible-playbook site.yml -i inventory/hosts.ini --tags common      # Seul le rôle common
 ansible-playbook site.yml -i inventory/hosts.ini --limit masters    # Seul le master
+ansible all -i inventory/hosts.ini -m ping                          # Test de connectivité
 ansible all -i inventory/hosts.ini -m shell -a "uptime"             # Commande sur toutes les VMs
 ```
 
