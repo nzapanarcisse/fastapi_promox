@@ -51,7 +51,7 @@ vm_user        = "k8sadmin"
 # ⚠️ Ici c'est la CLÉ PUBLIQUE (fichier .pub), PAS la clé privée !
 # Récupérez-la avec : cat ~/.ssh/proxmox_key.pub
 # Format attendu : une seule ligne commençant par ssh-ed25519 ou ssh-rsa
-ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOFjV7nUn/uucp/MreZ4PppiJyZuA0jzDt8qJm6/0AjH nzapa@nzapa-HP-EliteBook-840-G3"
+ssh_public_key = "proxmox ssh key pub"
 
 # ---- Master Node ----
 # vmid = identifiant unique de la VM dans Proxmox
